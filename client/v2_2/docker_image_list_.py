@@ -42,7 +42,7 @@ class Platform(object):
   See: https://docs.docker.com/registry/spec/manifest-v2-2/#manifest-list
   """
 
-  def __init__(self, content=None):
+  def __init__(self, content = None):
     self._content = content or {}
 
   def architecture(self):
@@ -131,7 +131,7 @@ class DockerImageList(object):
   # pytype: disable=bad-return-type
   @abc.abstractmethod
   def resolve_all(
-      self, target=None):
+      self, target = None):
     """Resolves a manifest list to a list of compatible manifests.
 
     Args:
@@ -139,11 +139,13 @@ class DockerImageList(object):
           platform defaults to linux/amd64.
 
     Returns:
-      A list of images that can be run on the target platform.
+      A list of images that can be run on the target platform. The images are
+      sorted by their digest.
     """
   # pytype: enable=bad-return-type
 
-  def resolve(self, target=None):
+  def resolve(self, target = None
+             ):
     """Resolves a manifest list to a compatible manifest.
 
     Args:
@@ -177,6 +179,44 @@ class DockerImageList(object):
     """Iterate over this manifest list's children."""
 
 
+class Delegate(DockerImageList):
+  """Forwards calls to the underlying image."""
+
+  def __init__(self, image):
+    """Constructor.
+
+    Args:
+      image: a DockerImageList on which __enter__ has already been called.
+    """
+    self._image = image
+
+  def manifest(self):
+    """Override."""
+    return self._image.manifest()
+
+  def media_type(self):
+    """Override."""
+    return self._image.media_type()
+
+  def resolve_all(
+      self, target = None):
+    """Override."""
+    return self._image.resolve_all(target)
+
+  def resolve(self,
+              target = None):
+    """Override."""
+    return self._image.resolve(target)
+
+  def __iter__(self):
+    """Override."""
+    return iter(self._image)
+
+  def __str__(self):
+    """Override."""
+    return str(self._image)
+
+
 class FromRegistry(DockerImageList):
   """This accesses a docker image list hosted on a registry (non-local)."""
 
@@ -185,7 +225,7 @@ class FromRegistry(DockerImageList):
       name,
       basic_creds,
       transport,
-      accepted_mimes=docker_http.MANIFEST_LIST_MIMES):
+      accepted_mimes = docker_http.MANIFEST_LIST_MIMES):
     self._name = name
     self._creds = basic_creds
     self._original_transport = transport
@@ -195,8 +235,8 @@ class FromRegistry(DockerImageList):
   def _content(
       self,
       suffix,
-      accepted_mimes=None,
-      cache=True
+      accepted_mimes = None,
+      cache = True
   ):
     """Fetches content of the resources from registry by http calls."""
     if isinstance(self._name, docker_name.Repository):
@@ -230,27 +270,33 @@ class FromRegistry(DockerImageList):
       digest = entry['digest']
       name = docker_name.Digest('{base}@{digest}'.format(
           base=self._name.as_repository(), digest=digest))
+      media_type = entry['mediaType']
 
-      # TODO(user): Support Image Index.
-      if entry['mediaType'] == docker_http.MANIFEST_LIST_MIME:
+      if media_type in docker_http.MANIFEST_LIST_MIMES:
         image = FromRegistry(name, self._creds, self._original_transport)
-      elif entry['mediaType'] == docker_http.MANIFEST_SCHEMA2_MIME:
+      elif media_type in docker_http.SUPPORTED_MANIFEST_MIMES:
         image = v2_2_image.FromRegistry(name, self._creds,
-                                        self._original_transport)
+                                        self._original_transport, [media_type])
       else:
-        raise InvalidMediaTypeError('Invalid media type: ' + entry['mediaType'])
+        raise InvalidMediaTypeError('Invalid media type: ' + media_type)
 
       platform = Platform(entry['platform']) if 'platform' in entry else None
       results.append((name, platform, image))
     return results
 
   def resolve_all(
-      self, target=None):
-    results = self.resolve_all_helper(target)
+      self, target = None):
+    results = self.resolve_all_unordered(target).items()
+    # Sort by name (which is equivalent as by digest) for deterministic output.
+    # We could let resolve_all_unordered() to return only a list of image, then
+    # use image.digest() as the sort key, but FromRegistry.digest() will
+    # eventually leads to another round trip call to registry. This inefficiency
+    # becomes worse as the image list has more children images. So we let
+    # resolve_all_unordered() to return both image names and images.
     results.sort(key=lambda (name, image): str(name))
     return [image for (_, image) in results]
 
-  def resolve_all_helper(
+  def resolve_all_unordered(
       self, target = None
   ):
     """Resolves a manifest list to a list of (digest, image) tuples.
@@ -262,15 +308,16 @@ class FromRegistry(DockerImageList):
     Returns:
       A list of (digest, image) tuples that can be run on the target platform.
     """
-    results = []
+    target = target or Platform()
+    results = {}
     images = self.images()
     for name, platform, image in images:
       # Recurse on manifest lists.
       if isinstance(image, FromRegistry):
         with image:
-          results.extend(image.resolve_all_helper(target))
+          results.update(image.resolve_all_unordered(target))
       elif target.can_run(platform):
-        results.append((name, image))
+        results[name] = image
     return results
 
   def exists(self):
@@ -313,17 +360,15 @@ class FromRegistry(DockerImageList):
     return '<docker_image_list.FromRegistry name: {}>'.format(str(self._name))
 
   def __iter__(self):
-    return iter(self.images())
+    return iter([(platform, image) for (_, platform, image) in self.images()])
 
 
 class FromList(DockerImageList):
   """This synthesizes a Manifest List from a list of images."""
 
   def __init__(self,
-               images,
-               name=None):
+               images):
     self._images = images
-    self._name = name
 
   def manifest(self):
     list_body = {
@@ -344,8 +389,9 @@ class FromList(DockerImageList):
       list_body['manifests'].append(manifest_body)
     return json.dumps(list_body, sort_keys=True)
 
+  # pytype: disable=bad-return-type
   def resolve_all(
-      self, target=None):
+      self, target = None):
     """Resolves a manifest list to a list of compatible manifests.
 
     Args:
@@ -355,6 +401,7 @@ class FromList(DockerImageList):
     Returns:
       A list of images that can be run on the target platform.
     """
+    target = target or Platform()
     results = []
     for (platform, image) in self._images:
       if isinstance(image, DockerImageList):
@@ -362,9 +409,14 @@ class FromList(DockerImageList):
           results.extend(image.resolve_all(target))
       elif target.can_run(platform):
         results.append(image)
-    # Sort by digest for deterministic output.
-    results.sort(key=lambda (image): image.digest())
-    return results
+
+    # Use dictionary to dedup
+    dgst_img_dict = {img.digest(): img for img in results}
+    results = []
+    # It is causing PyType to complain about the return type being
+    # List[DockerImageList], so we have the pytype disable comment workaround
+    # TODO(b/67895498)
+    return [dgst_img_dict[dgst] for dgst in sorted(dgst_img_dict.keys())]
 
   # __enter__ and __exit__ allow use as a context manager.
   def __enter__(self):
@@ -374,9 +426,4 @@ class FromList(DockerImageList):
     pass
 
   def __iter__(self):
-    results = []
-    for (platform, manifest) in self._images:
-      name = docker_name.Digest('{base}@{digest}'.format(
-          base=self._name.as_repository(), digest=manifest.digest()))
-      results.append((name, platform, manifest))
-    return iter(results)
+    return iter(self._images)

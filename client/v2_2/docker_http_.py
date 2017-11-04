@@ -55,7 +55,8 @@ OCI_MANIFEST_MIMES = [OCI_MANIFEST_MIME]
 # OCI and Schema2 are compatible formats.
 SUPPORTED_MANIFEST_MIMES = [OCI_MANIFEST_MIME, MANIFEST_SCHEMA2_MIME]
 
-MANIFEST_LIST_MIMES = [MANIFEST_LIST_MIME]
+# OCI Image Index and Manifest List are compatible formats.
+MANIFEST_LIST_MIMES = [OCI_IMAGE_INDEX_MIME, MANIFEST_LIST_MIME]
 
 
 class Diagnostic(object):
@@ -413,6 +414,8 @@ def ParseNextLinkHeader(
 def Scheme(endpoint):
   """Returns https scheme for all the endpoints except localhost."""
   if endpoint.startswith('localhost:'):
+    return 'http'
+  elif re.match(r'.*\.local(?::\d{1,5})?$', endpoint):
     return 'http'
   else:
     return 'https'
