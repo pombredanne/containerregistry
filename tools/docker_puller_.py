@@ -17,6 +17,7 @@
 
 import argparse
 import logging
+import sys
 import tarfile
 
 from containerregistry.client import docker_creds
@@ -24,10 +25,13 @@ from containerregistry.client import docker_name
 from containerregistry.client.v2 import docker_image as v2_image
 from containerregistry.client.v2_2 import docker_http
 from containerregistry.client.v2_2 import docker_image as v2_2_image
+from containerregistry.client.v2_2 import docker_image_list as image_list
 from containerregistry.client.v2_2 import save
 from containerregistry.client.v2_2 import v2_compat
 from containerregistry.tools import logging_setup
 from containerregistry.tools import patched
+from containerregistry.tools import platform_args
+from containerregistry.transport import retry
 from containerregistry.transport import transport_pool
 
 import httplib2
@@ -36,12 +40,18 @@ import httplib2
 parser = argparse.ArgumentParser(
     description='Pull images from a Docker Registry.')
 
-parser.add_argument('--name', action='store',
-                    help=('The name of the docker image to pull and save. '
-                          'Supports fully-qualified tag or digest references.'))
+parser.add_argument(
+    '--name',
+    action='store',
+    help=('The name of the docker image to pull and save. '
+          'Supports fully-qualified tag or digest references.'),
+    required=True)
 
-parser.add_argument('--tarball', action='store',
-                    help='Where to save the image tarball.')
+parser.add_argument(
+    '--tarball', action='store', help='Where to save the image tarball.',
+    required=True)
+
+platform_args.AddArguments(parser)
 
 _DEFAULT_TAG = 'i-was-a-digest'
 
@@ -58,8 +68,7 @@ _DEFAULT_TAG = 'i-was-a-digest'
 # only packages a single image, so this is preferable to doing something similar
 # in save.py itself.
 def _make_tag_if_digest(
-    name
-):
+    name):
   if isinstance(name, docker_name.Tag):
     return name
   return docker_name.Tag('{repo}:{tag}'.format(
@@ -71,10 +80,9 @@ def main():
   args = parser.parse_args()
   logging_setup.Init(args=args)
 
-  if not args.name or not args.tarball:
-    raise Exception('--name and --tarball are required arguments.')
-
-  transport = transport_pool.Http(httplib2.Http, size=8)
+  retry_factory = retry.Factory()
+  retry_factory = retry_factory.WithSourceTransportCallable(httplib2.Http)
+  transport = transport_pool.Http(retry_factory.Build, size=8)
 
   if '@' in args.name:
     name = docker_name.Digest(args.name)
@@ -92,20 +100,40 @@ def main():
 
   # Resolve the appropriate credential to use based on the standard Docker
   # client logic.
-  creds = docker_creds.DefaultKeychain.Resolve(name)
+  try:
+    creds = docker_creds.DefaultKeychain.Resolve(name)
+  # pylint: disable=broad-except
+  except Exception as e:
+    logging.fatal('Error resolving credentials for %s: %s', name, e)
+    sys.exit(1)
 
-  with tarfile.open(name=args.tarball, mode='w') as tar:
-    logging.info('Pulling v2.2 image from %r ...', name)
-    with v2_2_image.FromRegistry(name, creds, transport, accept) as v2_2_img:
-      if v2_2_img.exists():
-        save.tarball(_make_tag_if_digest(name), v2_2_img, tar)
-        return
+  try:
+    with tarfile.open(name=args.tarball, mode='w:') as tar:
+      logging.info('Pulling manifest list from %r ...', name)
+      with image_list.FromRegistry(name, creds, transport) as img_list:
+        if img_list.exists():
+          platform = platform_args.FromArgs(args)
+          # pytype: disable=wrong-arg-types
+          with img_list.resolve(platform) as default_child:
+            save.tarball(_make_tag_if_digest(name), default_child, tar)
+            return
+          # pytype: enable=wrong-arg-types
 
-    logging.info('Pulling v2 image from %r ...', name)
-    with v2_image.FromRegistry(name, creds, transport) as v2_img:
-      with v2_compat.V22FromV2(v2_img) as v2_2_img:
-        save.tarball(_make_tag_if_digest(name), v2_2_img, tar)
-        return
+      logging.info('Pulling v2.2 image from %r ...', name)
+      with v2_2_image.FromRegistry(name, creds, transport, accept) as v2_2_img:
+        if v2_2_img.exists():
+          save.tarball(_make_tag_if_digest(name), v2_2_img, tar)
+          return
+
+      logging.info('Pulling v2 image from %r ...', name)
+      with v2_image.FromRegistry(name, creds, transport) as v2_img:
+        with v2_compat.V22FromV2(v2_img) as v2_2_img:
+          save.tarball(_make_tag_if_digest(name), v2_2_img, tar)
+          return
+  # pylint: disable=broad-except
+  except Exception as e:
+    logging.fatal('Error pulling and saving image %s: %s', name, e)
+    sys.exit(1)
 
 
 if __name__ == '__main__':

@@ -3,8 +3,6 @@ steps:
 - name: gcr.io/cloud-builders/bazel
   args: [
     'build', '//:pusher.par',
-    # TODO(user): Remove once PAR compilation runs properly inside
-    # the Bazel sandbox on cloudbuild.
     '--strategy', 'PythonCompile=standalone'
   ]
 
@@ -14,6 +12,21 @@ steps:
     'cp',
     'bazel-bin/pusher.par',
     'gs://containerregistry-releases/$TAG_NAME/pusher.par'
+  ]
+
+# Build the digest PAR file
+- name: gcr.io/cloud-builders/bazel
+  args: [
+    'build', '//:digester.par',
+    '--strategy', 'PythonCompile=standalone'
+  ]
+
+# Upload the digest PAR file to a public GCS bucket
+- name: gcr.io/cloud-builders/gsutil
+  args: [
+    'cp',
+    'bazel-bin/digester.par',
+    'gs://containerregistry-releases/$TAG_NAME/digester.par'
   ]
 
 # We produce no Docker images.

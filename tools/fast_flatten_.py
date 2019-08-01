@@ -13,7 +13,9 @@
 # limitations under the License.
 """This package flattens image metadata into a single tarball."""
 
+from __future__ import absolute_import
 
+from __future__ import print_function
 
 import argparse
 import logging
@@ -21,48 +23,54 @@ import tarfile
 
 from containerregistry.client.v2_2 import docker_image as v2_2_image
 from containerregistry.tools import logging_setup
+from six.moves import zip  # pylint: disable=redefined-builtin
 
 parser = argparse.ArgumentParser(description='Flatten container images.')
 
 # The name of this flag was chosen for compatibility with docker_pusher.py
-parser.add_argument('--tarball', action='store',
-                    help='An optional legacy base image tarball.')
+parser.add_argument(
+    '--tarball', action='store', help='An optional legacy base image tarball.')
 
-parser.add_argument('--config', action='store',
-                    help='The path to the file storing the image config.')
+parser.add_argument(
+    '--config',
+    action='store',
+    help='The path to the file storing the image config.')
 
-parser.add_argument('--digest', action='append',
-                    help='The list of layer digest filenames in order.')
+parser.add_argument(
+    '--digest',
+    action='append',
+    help='The list of layer digest filenames in order.')
 
-parser.add_argument('--layer', action='append',
-                    help='The list of layer filenames in order.')
+parser.add_argument(
+    '--layer',
+    action='append',
+    help='The list of compressed layer filenames in order.')
+
+parser.add_argument(
+    '--uncompressed_layer',
+    action='append',
+    help='The list of uncompressed layer filenames in order.')
+
+parser.add_argument(
+    '--diff_id', action='append', help='The list of diff_ids in order.')
 
 # Output arguments.
-parser.add_argument('--filesystem', action='store',
-                    help='The name of where to write the filesystem tarball.')
+parser.add_argument(
+    '--filesystem',
+    action='store',
+    help='The name of where to write the filesystem tarball.')
 
-parser.add_argument('--metadata', action='store',
-                    help=('The name of where to write the container '
-                          'startup metadata.'))
-
-_THREADS = 8
+parser.add_argument(
+    '--metadata',
+    action='store',
+    help=('The name of where to write the container '
+          'startup metadata.'))
 
 
 def main():
   logging_setup.DefineCommandLineArgs(parser)
   args = parser.parse_args()
   logging_setup.Init(args=args)
-
-  if not args.config and (args.layer or args.digest):
-    raise Exception(
-        'Using --layer or --digest requires --config to be specified.')
-
-  if not args.filesystem or not args.metadata:
-    raise Exception(
-        '--filesystem and --metadata are required flags.')
-
-  if not args.config and not args.tarball:
-    raise Exception('Either --config or --tarball must be specified.')
 
   # If config is specified, use that.  Otherwise, fall back on reading
   # the config from the tarball.
@@ -77,17 +85,21 @@ def main():
   else:
     config = args.config
 
-  if len(args.digest or []) != len(args.layer or []):
-    raise Exception('--digest and --layer must have matching lengths.')
-
-  logging.info('Loading v2.2 image from disk ...')
-  with v2_2_image.FromDisk(config, zip(args.digest or [], args.layer or []),
-                           legacy_base=args.tarball) as v2_2_img:
-    with tarfile.open(args.filesystem, 'w') as tar:
+  layers = list(zip(args.digest or [], args.layer or []))
+  uncompressed_layers = list(
+      zip(args.diff_id or [], args.uncompressed_layer or []))
+  logging.info('Loading v2.2 image From Disk ...')
+  with v2_2_image.FromDisk(
+      config_file=config,
+      layers=layers,
+      uncompressed_layers=uncompressed_layers,
+      legacy_base=args.tarball) as v2_2_img:
+    with tarfile.open(args.filesystem, 'w:') as tar:
       v2_2_image.extract(v2_2_img, tar)
 
     with open(args.metadata, 'w') as f:
       f.write(v2_2_img.config_file())
+
 
 if __name__ == '__main__':
   main()

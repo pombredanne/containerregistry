@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """This package defines Tag a way of representing an image uri."""
 
+from __future__ import absolute_import
+from __future__ import division
 
+from __future__ import print_function
 
 import os
 import sys
+import six.moves.urllib.parse
 
 
 
@@ -30,8 +33,8 @@ _TAG_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789_-.ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 # These have the form: sha256:<hex string>
 _DIGEST_CHARS = 'sh:0123456789abcdef'
 
-# TODO(user): Add a flag to allow specifying custom app name to be appended to
-# useragent.
+# TODO(b/73235733): Add a flag to allow specifying custom app name to be
+# appended to useragent.
 _APP = os.path.basename(sys.argv[0]) if sys.argv[0] else 'console'
 USER_AGENT = '//containerregistry/client:%s' % _APP
 
@@ -39,13 +42,8 @@ DEFAULT_DOMAIN = 'index.docker.io'
 DEFAULT_TAG = 'latest'
 
 
-def _check_element(
-    name,
-    element,
-    characters,
-    min_len,
-    max_len
-):
+def _check_element(name, element, characters, min_len,
+                   max_len):
   """Checks a given named element matches character and length restrictions.
 
   Args:
@@ -60,20 +58,20 @@ def _check_element(
   """
   length = len(element)
   if min_len and length < min_len:
-    raise BadNameException('Invalid %s: %s, must be at least %s characters'
-                           % (name, element, min_len))
+    raise BadNameException('Invalid %s: %s, must be at least %s characters' %
+                           (name, element, min_len))
 
   if max_len and length > max_len:
-    raise BadNameException('Invalid %s: %s, must be at most %s characters'
-                           % (name, element, max_len))
+    raise BadNameException('Invalid %s: %s, must be at most %s characters' %
+                           (name, element, max_len))
 
   if element.strip(characters):
-    raise BadNameException('Invalid %s: %s, acceptable characters include: %s'
-                           % (name, element, characters))
+    raise BadNameException('Invalid %s: %s, acceptable characters include: %s' %
+                           (name, element, characters))
 
 
 def _check_repository(repository):
-  _check_element('repository', repository, _REPOSITORY_CHARS, 4, 255)
+  _check_element('repository', repository, _REPOSITORY_CHARS, 2, 255)
 
 
 def _check_tag(tag):
@@ -84,12 +82,24 @@ def _check_digest(digest):
   _check_element('digest', digest, _DIGEST_CHARS, 7 + 64, 7 + 64)
 
 
+def _check_registry(registry):
+  # Per RFC 3986, netlocs (authorities) are required to be prefixed with '//'
+  parsed_hostname = six.moves.urllib.parse.urlparse('//' + registry)
+
+  # If urlparse doesn't recognize the given registry as a netloc, fail
+  # validation.
+  if registry != parsed_hostname.netloc:
+    raise BadNameException('Invalid registry: %s' % (registry))
+
+
 class Registry(object):
   """Stores a docker registry name in a structured form."""
 
-  def __init__(self, name, strict=True):
-    if strict and not name:
-      raise BadNameException('A Docker registry domain must be specified.')
+  def __init__(self, name, strict = True):
+    if strict:
+      if not name:
+        raise BadNameException('A Docker registry domain must be specified.')
+      _check_registry(name)
 
     self._registry = name
 
@@ -99,6 +109,9 @@ class Registry(object):
 
   def __str__(self):
     return self._registry
+
+  def __repr__(self):
+    return self.__str__()
 
   def __eq__(self, other):
     return (bool(other) and
@@ -120,7 +133,7 @@ class Registry(object):
 class Repository(Registry):
   """Stores a docker repository name in a structured form."""
 
-  def __init__(self, name, strict=True):
+  def __init__(self, name, strict = True):
     if not name:
       raise BadNameException('A Docker image name must be specified')
 
@@ -178,7 +191,7 @@ class Repository(Registry):
 class Tag(Repository):
   """Stores a docker repository tag in a structured form."""
 
-  def __init__(self, name, strict=True):
+  def __init__(self, name, strict = True):
     parts = name.rsplit(':', 1)
     if len(parts) != 2:
       base = name
@@ -234,7 +247,7 @@ class Tag(Repository):
 class Digest(Repository):
   """Stores a docker repository digest in a structured form."""
 
-  def __init__(self, name, strict=True):
+  def __init__(self, name, strict = True):
     parts = name.split('@')
     if len(parts) != 2:
       raise self._validation_exception(name)
@@ -276,3 +289,25 @@ class Digest(Repository):
 
   def __hash__(self):
     return hash((self.registry, self.repository, self.digest))
+
+
+def from_string(name):
+  """Parses the given name string.
+
+  Parsing is done strictly; registry is required and a Tag will only be returned
+  if specified explicitly in the given name string.
+  Args:
+    name: The name to convert.
+  Returns:
+    The parsed name.
+  Raises:
+    BadNameException: The name could not be parsed.
+  """
+  for name_type in [Digest, Tag, Repository, Registry]:
+    # Re-uses validation logic in the name classes themselves.
+    try:
+      return name_type(name, strict=True)
+    except BadNameException:
+      pass
+  raise BadNameException("'%s' is not a valid Tag, Digest, Repository or "
+                         "Registry" % (name))
